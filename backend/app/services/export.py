@@ -55,17 +55,51 @@ def build_trade_log_dataframe(db: Session, index_key: str | None = None) -> pd.D
     return pd.DataFrame(rows, columns=columns)
 
 
+def build_today_trades_dataframe(db: Session, trade_date, index_keys: list[str]) -> pd.DataFrame:
+    """
+    Simplified export for a quick, at-a-glance sheet: option name / price /
+    target / stop-loss / enter-when. Only includes legs that actually
+    generated a real trade (skips NO_SIGNAL rows, which have no strike or
+    price -- there's nothing to put on the sheet for those).
+    """
+    recs = (
+        db.query(Recommendation)
+        .filter(Recommendation.index_key.in_(index_keys), Recommendation.trade_date == trade_date, Recommendation.option_type.isnot(None))
+        .order_by(Recommendation.index_key.asc())
+        .all()
+    )
+    role_order = {"PRIMARY": 0, "BREAKOUT_UP": 1, "BREAKOUT_DOWN": 2}
+    recs.sort(key=lambda r: (r.index_key, role_order.get(r.role, 99)))
+
+    rows = []
+    for r in recs:
+        option_name = f"{r.index_key} {r.strike:.0f} {r.option_type} (exp {r.expiry})"
+        rows.append({
+            "Option Name": option_name,
+            "Price": r.premium_at_generation,
+            "Target 1": r.target_premium_1,
+            "Target 2": r.target_premium_2,
+            "Target 3": r.target_premium_3,
+            "Stop Loss": r.stop_premium,
+            "Enter When": r.entry_trigger_desc,
+            "Status": r.status,
+            "Leg": r.role,
+        })
+    columns = ["Option Name", "Price", "Target 1", "Target 2", "Target 3", "Stop Loss", "Enter When", "Status", "Leg"]
+    return pd.DataFrame(rows, columns=columns)
+
+
 def to_csv_bytes(df: pd.DataFrame) -> bytes:
     buf = io.StringIO()
     df.to_csv(buf, index=False)
     return buf.getvalue().encode("utf-8")
 
 
-def to_xlsx_bytes(df: pd.DataFrame) -> bytes:
+def to_xlsx_bytes(df: pd.DataFrame, sheet_name: str = "Trade Log") -> bytes:
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Trade Log")
-        ws = writer.sheets["Trade Log"]
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+        ws = writer.sheets[sheet_name]
         for col_cells in ws.columns:
             length = max((len(str(c.value)) for c in col_cells if c.value is not None), default=10)
             ws.column_dimensions[col_cells[0].column_letter].width = min(max(length + 2, 10), 40)

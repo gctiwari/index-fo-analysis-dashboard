@@ -34,11 +34,11 @@ def reset_db():
     Base.metadata.create_all(bind=engine)
 
 def make_rec(db, option_type, trigger, stop, cmp=100.0):
-    from datetime import date
+    from app.services.market_hours import today_ist
     rec = Recommendation(
-        index_key="NIFTY", trade_date=date.today(), role="PRIMARY", status="PENDING",
+        index_key="NIFTY", trade_date=today_ist(), role="PRIMARY", status="PENDING",
         direction="Bullish" if option_type == "CALL" else "Bearish", option_type=option_type,
-        strike=round(trigger), expiry=(date.today() + timedelta(days=7)).isoformat(), lot_size=75,
+        strike=round(trigger), expiry=(today_ist() + timedelta(days=7)).isoformat(), lot_size=75,
         cmp_at_generation=cmp, premium_at_generation=50.0, entry_type="Conditional",
         entry_trigger_desc=f"Enter on a 15-min close beyond {trigger}", entry_trigger_index_level=trigger,
         target_index_1=trigger + 10, target_index_2=trigger + 20, target_index_3=trigger + 30,

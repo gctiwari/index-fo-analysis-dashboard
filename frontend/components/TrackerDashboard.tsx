@@ -7,12 +7,13 @@ import {
   trackingTodayPath, trackingPaperTradesPath, trackingNotExecutedPath, trackingHistoryPath, invalidatedPath,
   performancePath, generateNowPath, checkNowPath, finalizeNowPath,
   equityCurvePath, equityCurveAllPath, exportCsvUrl, exportXlsxUrl, exportAllCsvUrl, exportAllXlsxUrl,
+  yesterdayPath,
 } from "@/lib/api";
 import type { RecommendationRecord, PaperTradeRecord, PerformanceResponse } from "@/lib/trackingTypes";
 import { SectionCard, StatTile, LoadingPanel, ErrorPanel, RiskBadge } from "@/components/ui";
 import EquityCurveChart from "@/components/EquityCurveChart";
 
-type SubView = "today" | "paper" | "not_executed" | "performance";
+type SubView = "today" | "yesterday" | "paper" | "not_executed" | "performance";
 
 const STATUS_STYLE: Record<string, string> = {
   PENDING: "text-gold bg-gold/10 border-gold/30",
@@ -53,6 +54,7 @@ export default function TrackerDashboard({ index }: { index: string }) {
         <div className="flex gap-1 rounded-lg border border-base-border p-1 bg-base-panel w-fit">
           {([
             ["today", "Today"],
+            ["yesterday", "Yesterday"],
             ["paper", "Paper Trades"],
             ["not_executed", "Not Executed"],
             ["performance", "Performance"],
@@ -92,6 +94,7 @@ export default function TrackerDashboard({ index }: { index: string }) {
       </p>
 
       {sub === "today" && <TodayView index={index} />}
+      {sub === "yesterday" && <YesterdayView index={index} />}
       {sub === "paper" && <PaperTradesView index={index} />}
       {sub === "not_executed" && <NotExecutedView index={index} />}
       {sub === "performance" && <PerformanceView index={index} />}
@@ -141,9 +144,43 @@ function TodayView({ index }: { index: string }) {
   );
 }
 
+function YesterdayView({ index }: { index: string }) {
+  const { data, error, isLoading } = useSWR<{ trade_date: string | null; legs: RecommendationRecord[] }>(
+    yesterdayPath(index), fetcher, { refreshInterval: 60_000 }
+  );
+  if (isLoading) return <LoadingPanel label="Loading yesterday's results…" />;
+  if (error) return <ErrorPanel message={error.message} />;
+  if (!data || !data.trade_date || data.legs.length === 0) {
+    return <EmptyState text="No prior trading session found yet for this index — results will appear here after the first day it's tracked." />;
+  }
+
+  const primary = data.legs.find((r) => r.role === "PRIMARY");
+  const breakoutUp = data.legs.find((r) => r.role === "BREAKOUT_UP");
+  const breakoutDown = data.legs.find((r) => r.role === "BREAKOUT_DOWN");
+
+  return (
+    <div className="space-y-4">
+      <div className="panel p-4 border-gold/20 bg-gold/5">
+        <p className="text-xs text-ink-muted leading-relaxed">
+          <span className="text-gold font-medium">Results for {data.trade_date}</span> — the most recent completed
+          trading session. Each leg below shows its final outcome: executed with a realized P&amp;L, not executed
+          because the entry trigger was never reached, invalidated because price broke the setup before it could
+          trigger, or no signal that day.
+        </p>
+      </div>
+
+      {primary && <RecommendationCard rec={primary} title="Primary Pick" subtitle="Confluence-gated — only exists when several signals already agreed" />}
+      {breakoutUp && <RecommendationCard rec={breakoutUp} title="Breakout Watch (upside)" subtitle="Reactive breakout watch — no confluence gate" accent="bull" />}
+      {breakoutDown && <RecommendationCard rec={breakoutDown} title="Breakdown Watch (downside)" subtitle="Reactive breakdown watch — no confluence gate" accent="bear" />}
+    </div>
+  );
+}
+
 function RecommendationCard({ rec, title, subtitle, accent }: { rec: RecommendationRecord; title: string; subtitle: string; accent?: "bull" | "bear" }) {
   const genTime = rec.generated_at ? new Date(rec.generated_at).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "—";
   const borderClass = accent === "bull" ? "border-signal-bull/20" : accent === "bear" ? "border-signal-bear/20" : "";
+  const isPastDay = rec.trade_date !== new Date().toLocaleDateString("en-CA"); // en-CA gives YYYY-MM-DD, matching the API's date format
+  const dayWord = isPastDay ? "that day" : "today";
 
   return (
     <div className={clsx("panel p-6 space-y-4", borderClass)}>
@@ -152,7 +189,7 @@ function RecommendationCard({ rec, title, subtitle, accent }: { rec: Recommendat
           <p className="text-[11px] uppercase tracking-widest text-gold/80 font-medium mb-1">{title}</p>
           <p className="text-xs text-ink-faint mb-1">{subtitle}</p>
           <h3 className="font-display text-xl font-semibold text-ink">
-            {rec.status === "NO_SIGNAL" ? "No watch active today" : `${rec.option_type} ${rec.strike ?? ""}`}
+            {rec.status === "NO_SIGNAL" ? `No watch active ${dayWord}` : `${rec.option_type} ${rec.strike ?? ""}`}
           </h3>
         </div>
         <span className={clsx("text-xs font-medium px-2.5 py-1 rounded-full border uppercase tracking-wide", STATUS_STYLE[rec.status])}>
@@ -169,7 +206,8 @@ function RecommendationCard({ rec, title, subtitle, accent }: { rec: Recommendat
             <span className="text-ink font-medium">{rec.cmp_at_generation?.toLocaleString("en-IN")}</span>):{" "}
             {rec.option_type === "CALL" ? "buy a call" : "buy a put"} at strike{" "}
             <span className="text-ink font-medium">{rec.strike}</span>, estimated cost{" "}
-            <span className="text-ink font-medium">₹{rec.premium_at_generation}</span>. Fixed for the rest of today.
+            <span className="text-ink font-medium">₹{rec.premium_at_generation}</span>.{" "}
+            {isPastDay ? "This was fixed for the rest of that session." : "Fixed for the rest of today."}
           </p>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <StatTile label="Strike / Premium" value={`${rec.strike} · ₹${rec.premium_at_generation}`} />
@@ -203,7 +241,7 @@ function RecommendationCard({ rec, title, subtitle, accent }: { rec: Recommendat
         </details>
       )}
 
-      {rec.status !== "NO_SIGNAL" && rec.live.available && (
+      {rec.status !== "NO_SIGNAL" && rec.live?.available && (
         <SectionCard title="Live Status" eyebrow="Updates automatically — the plan above never does" className="bg-base-alt/40">
           {rec.status === "PENDING" && (
             <div className="space-y-2">
@@ -234,7 +272,7 @@ function RecommendationCard({ rec, title, subtitle, accent }: { rec: Recommendat
       )}
 
       {rec.paper_trade && rec.paper_trade.status === "CLOSED" && (
-        <SectionCard title="Result" eyebrow="This leg is closed for today" className="bg-base-alt/40">
+        <SectionCard title="Result" eyebrow={isPastDay ? "This leg closed that session" : "This leg is closed for today"} className="bg-base-alt/40">
           <PaperTradeCard trade={rec.paper_trade} />
         </SectionCard>
       )}

@@ -19,7 +19,7 @@ Open http://localhost:3000. The backend must be running on port 8000 (see `../ba
 
 - `app/page.tsx` — top-level layout: index tabs + Market Outlook / Trade Desk toggle
 - `components/OutlookDashboard.tsx` — live market read (bias, confidence gauge, levels, scenarios, MTF trend, indicators, patterns, confluence audit trail, risk warnings) — this refreshes as prices move, since it's describing current conditions, not a trade you can take
-- `components/TrackerDashboard.tsx` — the Trade Desk: **one locked recommendation per day** (Today), Paper Trades, Not Executed, and Performance (with equity curve + CSV/Excel export). The locked plan's numbers never change after generation — only a separate "live status" section (current price, distance to trigger, unrealized P&L) updates on refresh
+- `components/TrackerDashboard.tsx` — the Trade Desk: **one locked recommendation per day** (Today), Yesterday (most recent completed session's final results), Paper Trades, Not Executed / Invalidated, and Performance (with equity curve + CSV/Excel export). The locked plan's numbers never change after generation — only a separate "live status" section (current price, distance to trigger, unrealized P&L) updates on refresh
 - `components/TickerStrip.tsx` — scrolling macro ticker (VIX, USDINR, Crude, Gold, US10Y, Dow, Nasdaq)
 - `lib/types.ts` / `lib/trackingTypes.ts` — mirror the backend Pydantic/dict schemas exactly
 - `lib/api.ts` — typed fetch wrapper; change `NEXT_PUBLIC_API_URL` to point at a deployed backend

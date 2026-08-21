@@ -2,7 +2,7 @@
 import { useState } from "react";
 import useSWR from "swr";
 import clsx from "clsx";
-import { fetcher, indicesPath } from "@/lib/api";
+import { fetcher, indicesPath, exportTodayXlsxUrl } from "@/lib/api";
 import type { IndexMeta } from "@/lib/types";
 import IndexTabs from "@/components/IndexTabs";
 import TickerStrip from "@/components/TickerStrip";
@@ -26,20 +26,29 @@ export default function Home() {
             <p className="text-[11px] uppercase tracking-[0.2em] text-gold font-medium">Pre-Market · Post-Market Desk</p>
             <h1 className="font-display text-2xl font-semibold text-ink mt-0.5">Index F&amp;O Analysis</h1>
           </div>
-          <nav className="flex gap-1 rounded-lg border border-base-border p-1 bg-base-panel w-fit">
-            {(["outlook", "tracker"] as View[]).map((v) => (
-              <button
-                key={v}
-                onClick={() => setView(v)}
-                className={clsx(
-                  "px-4 py-1.5 rounded-md text-sm font-medium font-display transition-colors",
-                  view === v ? "bg-gold text-base-deep" : "text-ink-muted hover:text-ink"
-                )}
-              >
-                {v === "outlook" ? "Market Outlook" : "Trade Desk"}
-              </button>
-            ))}
-          </nav>
+          <div className="flex items-center gap-2">
+            <nav className="flex gap-1 rounded-lg border border-base-border p-1 bg-base-panel w-fit">
+              {(["outlook", "tracker"] as View[]).map((v) => (
+                <button
+                  key={v}
+                  onClick={() => setView(v)}
+                  className={clsx(
+                    "px-4 py-1.5 rounded-md text-sm font-medium font-display transition-colors",
+                    view === v ? "bg-gold text-base-deep" : "text-ink-muted hover:text-ink"
+                  )}
+                >
+                  {v === "outlook" ? "Market Outlook" : "Trade Desk"}
+                </button>
+              ))}
+            </nav>
+            <a
+              href={exportTodayXlsxUrl}
+              title="Download an Excel sheet of every trade generated today, across all indices"
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-base-border bg-base-panel text-sm font-medium font-display text-ink-muted hover:text-gold hover:border-gold/40 transition-colors whitespace-nowrap"
+            >
+              ⬇ Today&apos;s Trades
+            </a>
+          </div>
         </div>
       </header>
 

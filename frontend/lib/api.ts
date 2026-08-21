@@ -44,3 +44,5 @@ export const exportCsvUrl = (index: string) => `${API_BASE}/export/${index}/csv`
 export const exportXlsxUrl = (index: string) => `${API_BASE}/export/${index}/xlsx`;
 export const exportAllCsvUrl = `${API_BASE}/export-all/csv`;
 export const exportAllXlsxUrl = `${API_BASE}/export-all/xlsx`;
+export const exportTodayXlsxUrl = `${API_BASE}/export-today/xlsx`;
+export const yesterdayPath = (index: string) => `/tracking/${index}/yesterday`;

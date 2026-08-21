@@ -39,9 +39,15 @@ a breakout level is too close to CMP to be meaningful) -- so history has no sile
   a `"live"` block with read-only status: `current_price`, `distance_to_trigger` (while PENDING), or
   `current_premium`/`unrealized_pnl_pct`/`progress_to_target_1_pct` (once EXECUTED). The `live` block updates
   every call; everything else in each leg does not change until the next trading day.
+- `GET /api/tracking/{index}/yesterday` — the most recent *prior* trading session's legs, with their final
+  outcome. Finds the last date that actually has data (correctly lands on Friday if today is Monday, without a
+  holiday calendar). Read-only, but lazily settles any leg still stuck `PENDING` from that day using *that day's*
+  actual closing price (never today's live price) -- a day that's over shouldn't show a permanently-stuck PENDING
+  just because the server wasn't running at 15:32 IST that particular day.
 - `GET /api/tracking/{index}/paper-trades` — all paper trades for the index, newest first (`?status=OPEN|CLOSED`)
 - `GET /api/tracking/{index}/not-executed` — recommendations whose entry never triggered, with the reason
-- `GET /api/tracking/{index}/history` — full daily history (NO_SIGNAL / PENDING / EXECUTED / NOT_EXECUTED)
+- `GET /api/tracking/{index}/invalidated` — recommendations whose setup broke down before the entry ever triggered (distinct from not-executed -- see the trigger-execution RCA below)
+- `GET /api/tracking/{index}/history` — full daily history (NO_SIGNAL / PENDING / EXECUTED / NOT_EXECUTED / INVALIDATED)
 - `GET /api/performance` and `GET /api/performance/{index}` — % executed, win rate, avg return, total P&L, best/worst trade
 - `POST /api/tracking/{index}/generate-now` — **testing-only override**: wipes and regenerates ALL of today's locked legs at the current price. Normal use shouldn't need this -- `/today` already auto-generates once and then stays fixed.
 - `POST /api/tracking/{index}/check-now` — manual: run one monitoring pass (trigger entries / manage open trades)
@@ -79,8 +85,13 @@ scheduler only checks weekday, not exchange holidays.
   chronological, cumulative P&L (₹ per lot and %) across every closed paper trade, in the order trades closed.
   This is a simple additive curve (each trade's % is summed, not compounded) so it reads cleanly on a chart.
 - `GET /api/export/{index}/csv`, `GET /api/export/{index}/xlsx` — full trade-log history for one index
-  (every day: NO_SIGNAL, PENDING, EXECUTED, NOT_EXECUTED, with entry/exit/targets/P&L columns).
+  (every day: NO_SIGNAL, PENDING, EXECUTED, NOT_EXECUTED, INVALIDATED, with entry/exit/targets/P&L columns).
 - `GET /api/export-all/csv`, `GET /api/export-all/xlsx` — same, across all tracked indices.
+- `GET /api/export-today/xlsx` — a quick, at-a-glance sheet of every trade generated **today**, across all active
+  indices, with exactly these columns: **Option Name / Price / Target 1 / Target 2 / Target 3 / Stop Loss /
+  Enter When** (plus Status and Leg for context). This is the button next to the Trade Desk tab in the UI.
+  Generates today's recommendations first if nobody's opened the Trade Desk yet today, so it always has data
+  to export. Built with `build_today_trades_dataframe()` in `app/services/export.py`.
 - Built with `app/services/export.py` (pandas + openpyxl); columns auto-fit width in the Excel version.
 
 `{index}` is one of `NIFTY`, `BANKNIFTY`, `SENSEX` (live in this build), or `FINNIFTY` / `MIDCPNIFTY` (registered but not yet wired to a data source — see below).
@@ -134,6 +145,7 @@ Run them with:
 cd backend
 python3 tests/test_candle_completeness.py
 python3 tests/test_entry_confirmation_scenarios.py
+python3 tests/test_today_export_and_yesterday.py
 ```
 
 **On before/after execution-rate numbers:** no historical `tracking.db` or trade logs were available to analyze real generated trades — only the code itself. I'm not fabricating plausible-looking percentages. If you export your `tracking.db`, the `/api/performance/{index}` endpoint (and `compute_performance()` in `tracker.py`) can compute real before/after execution rates directly from it.

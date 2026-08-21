@@ -14,12 +14,17 @@ from datetime import date, timedelta
 from statistics import NormalDist
 
 from app.config import INDEX_REGISTRY, RISK_FREE_RATE
+from app.services.market_hours import today_ist
 
 _N = NormalDist()
 
 
 def _next_weekly_expiry(today: date | None = None) -> date:
-    today = today or date.today()
+    # IST, not system/UTC date -- system local time can be a different calendar
+    # date from IST for part of the day (system UTC evening = already tomorrow
+    # in IST), which could silently pick the wrong Thursday right at that
+    # boundary. Expiry selection should always follow the exchange's own date.
+    today = today or today_ist()
     days_ahead = (3 - today.weekday()) % 7  # Thursday = 3
     days_ahead = days_ahead or 7
     return today + timedelta(days=days_ahead)
@@ -58,7 +63,7 @@ def generate_trade_idea(index_key: str, cmp: float, confluence: dict, ind: dict,
     option_type = "CALL" if bias == "Bullish" else "PUT"
     strike = nearest_strike(cmp, cfg.strike_interval, otm_steps=1, direction=option_type)
     expiry = _next_weekly_expiry()
-    dte = max((expiry - date.today()).days, 1)
+    dte = max((expiry - today_ist()).days, 1)
     premium = estimate_premium(cmp, strike, dte, ind["atr_pct"], option_type)
 
     atr_val = ind["atr_14"]
@@ -183,7 +188,7 @@ def generate_breakout_bracket(index_key: str, cmp: float, ind: dict, levels: dic
     """
     cfg = INDEX_REGISTRY[index_key]
     expiry = _next_weekly_expiry()
-    dte = max((expiry - date.today()).days, 1)
+    dte = max((expiry - today_ist()).days, 1)
 
     ideas: list[dict] = []
 

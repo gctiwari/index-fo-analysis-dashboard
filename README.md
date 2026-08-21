@@ -73,6 +73,8 @@ rather than a mockup:
 - **Performance analytics**: % of recommendations that actually get executed, win rate, average return per trade, average win/loss, best/worst trade, and total P&L per lot — both per-index and combined.
 - **Running equity curve**: a chart of cumulative P&L across every closed paper trade, per-index and combined across all indices.
 - **CSV / Excel export**: download the full trade-log history (every day, every field) for one index or all indices, as CSV or Excel.
+- **Today's Trades (quick export)**: a one-click "⬇ Today's Trades" button next to the Trade Desk tab downloads a simplified Excel sheet of everything generated today across all indices — Option Name / Price / Target 1-3 / Stop Loss / Enter When.
+- **Yesterday's results**: a "Yesterday" sub-tab shows the most recent completed session's final outcome per leg — executed with realized P&L, not executed, or invalidated (setup broke down before the entry ever triggered) — read directly from the trade-tracking database, not recomputed.
 - Dark, institutional-style dashboard UI
 
 **Deliberately stubbed / documented as extension points** (see `backend/README.md` for details):

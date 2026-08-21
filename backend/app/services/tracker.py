@@ -339,14 +339,32 @@ def monitor_tick(db: Session, index_key: str):
             db.commit()
 
 
-def finalize_day(db: Session, index_key: str):
-    """Run once after market close: settle anything still open/pending."""
-    trade_date = today_ist()
+def finalize_day(db: Session, index_key: str, trade_date=None):
+    """Settle anything still open/pending for the given trade_date (defaults to today).
+    Passing a past date lets a stale PENDING row from a day the server wasn't running
+    late enough to auto-finalize get lazily settled the next time it's actually looked at
+    (e.g. via the /yesterday endpoint), instead of showing a permanently-stuck PENDING
+    for a session that's obviously long over."""
+    trade_date = trade_date or today_ist()
+    is_today = trade_date == today_ist()
     now = now_ist().replace(tzinfo=None)
-    try:
-        cmp = get_last_price(index_key)
-    except DataUnavailableError:
-        cmp = None
+
+    if is_today:
+        # Settling the current session -- use the live price, as before.
+        try:
+            cmp = get_last_price(index_key)
+        except DataUnavailableError:
+            cmp = None
+    else:
+        # Settling a PAST session that was never properly closed out (server wasn't
+        # running at 15:32 IST that day) -- use THAT day's actual close, never today's
+        # live price, or the exit would be priced on the wrong day entirely.
+        try:
+            daily_df = get_ohlcv(index_key, "1d")
+            day_rows = daily_df[daily_df.index.date == trade_date]
+            cmp = float(day_rows["close"].iloc[-1]) if len(day_rows) else None
+        except DataUnavailableError:
+            cmp = None
 
     pending = (
         db.query(Recommendation)
@@ -385,6 +403,48 @@ def finalize_day(db: Session, index_key: str):
         _close(db, trade, exit_index_level=cmp or trade.entry_index_level, exit_premium=premium, exit_time=now, outcome="EOD_EXIT")
 
     db.commit()
+
+
+def most_recent_prior_session_date(db: Session, index_key: str):
+    """
+    The most recent trade_date strictly before today that actually has
+    recommendation rows for this index -- robust to weekends/holidays
+    without needing a holiday calendar (if today is Monday, this correctly
+    finds Friday rather than blindly subtracting one calendar day, which
+    would land on Sunday and find nothing).
+    """
+    row = (
+        db.query(Recommendation.trade_date)
+        .filter(Recommendation.index_key == index_key, Recommendation.trade_date < today_ist())
+        .order_by(Recommendation.trade_date.desc())
+        .first()
+    )
+    return row[0] if row else None
+
+
+def get_session(db: Session, index_key: str, trade_date) -> list[Recommendation]:
+    """
+    Read the (already-generated) recommendations for a specific past date.
+    Lazily finalizes anything still PENDING for that date first -- a day
+    that's already over should never show a permanently-stuck PENDING just
+    because the server wasn't running at 15:32 IST that particular day.
+    """
+    still_pending = (
+        db.query(Recommendation)
+        .filter(Recommendation.index_key == index_key, Recommendation.trade_date == trade_date, Recommendation.status == "PENDING")
+        .count()
+    )
+    if still_pending:
+        finalize_day(db, index_key, trade_date=trade_date)
+
+    recs = (
+        db.query(Recommendation)
+        .filter(Recommendation.index_key == index_key, Recommendation.trade_date == trade_date)
+        .all()
+    )
+    order = {"PRIMARY": 0, "BREAKOUT_UP": 1, "BREAKOUT_DOWN": 2}
+    recs.sort(key=lambda r: order.get(r.role, 99))
+    return recs
 
 
 def get_live_status(index_key: str, rec: Recommendation) -> dict:

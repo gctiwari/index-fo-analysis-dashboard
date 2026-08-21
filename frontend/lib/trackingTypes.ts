@@ -66,7 +66,7 @@ export interface RecommendationRecord {
   reasoning: string | null;
   raw: Record<string, unknown> | null;
   paper_trade: PaperTradeRecord | null;
-  live: LiveStatus;
+  live?: LiveStatus;
   diagnostics: RecommendationDiagnostics;
 }
 

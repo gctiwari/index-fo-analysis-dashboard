@@ -11,7 +11,7 @@ from app.config import INDEX_REGISTRY, ACTIVE_INDICES
 from app.models_db import Recommendation, PaperTrade
 from app.services import tracker
 from app.services.market_hours import today_ist, is_market_open, now_ist
-from app.services.export import build_trade_log_dataframe, to_csv_bytes, to_xlsx_bytes
+from app.services.export import build_trade_log_dataframe, build_today_trades_dataframe, to_csv_bytes, to_xlsx_bytes
 
 router = APIRouter()
 
@@ -148,6 +148,25 @@ def get_today(index_key: str, db: Session = Depends(get_db)):
     return out
 
 
+@router.get("/tracking/{index_key}/yesterday")
+def get_yesterday(index_key: str, db: Session = Depends(get_db)):
+    """
+    Results for the most recent PRIOR trading session (not necessarily
+    literally 24 hours ago -- correctly finds the last session with data,
+    so it lands on Friday if today is Monday, without needing a holiday
+    calendar). Read-only: no new recommendation is generated here. Any leg
+    still PENDING from that day (e.g. the server wasn't running at 15:32
+    IST that day to auto-settle it) gets lazily finalized using THAT day's
+    actual closing price, not today's live price.
+    """
+    index_key = _require_active(index_key)
+    prior_date = tracker.most_recent_prior_session_date(db, index_key)
+    if prior_date is None:
+        return {"trade_date": None, "legs": []}
+    recs = tracker.get_session(db, index_key, prior_date)
+    return {"trade_date": prior_date.isoformat(), "legs": [_rec_to_dict(r) for r in recs]}
+
+
 @router.post("/tracking/{index_key}/generate-now")
 def generate_now(index_key: str, db: Session = Depends(get_db)):
     """Testing-only override: wipes and regenerates ALL of today's legs (Primary + both
@@ -264,8 +283,8 @@ def _csv_response(df, filename: str) -> StreamingResponse:
     )
 
 
-def _xlsx_response(df, filename: str) -> StreamingResponse:
-    data = to_xlsx_bytes(df)
+def _xlsx_response(df, filename: str, sheet_name: str = "Trade Log") -> StreamingResponse:
+    data = to_xlsx_bytes(df, sheet_name=sheet_name)
     return StreamingResponse(
         io.BytesIO(data),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -297,3 +316,18 @@ def export_all_csv(db: Session = Depends(get_db)):
 def export_all_xlsx(db: Session = Depends(get_db)):
     df = build_trade_log_dataframe(db, None)
     return _xlsx_response(df, f"all_indices_trade_log_{today_ist().isoformat()}.xlsx")
+
+
+@router.get("/export-today/xlsx")
+def export_today_xlsx(db: Session = Depends(get_db)):
+    """
+    Quick, at-a-glance sheet of every trade generated today across all
+    active indices: Option Name / Price / Target 1-3 / Stop Loss / Enter
+    When / Status. Generates today's recommendations first if they don't
+    exist yet (same idempotent generation as /today), so this works even
+    if nobody has opened the Trade Desk tab yet today.
+    """
+    for idx in ACTIVE_INDICES:
+        tracker.generate_daily_recommendations(db, idx)
+    df = build_today_trades_dataframe(db, today_ist(), ACTIVE_INDICES)
+    return _xlsx_response(df, f"todays_trades_{today_ist().isoformat()}.xlsx", sheet_name="Today's Trades")
