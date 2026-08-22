@@ -26,24 +26,23 @@ def get_db():
 
 
 def init_db():
-    _migrate_if_needed()
+    """
+    SQLAlchemy's create_all() only creates missing TABLES -- it never alters
+    an existing table's columns. If the schema has drifted from an older
+    version of this app (e.g. before the `role` or monitoring-diagnostics
+    columns existed), old queries would crash. Per explicit product
+    decision, preserving old tracking.db history across schema changes is
+    NOT a requirement for this prototype -- a fresh database is entirely
+    acceptable, so this just drops and recreates on any detected drift
+    rather than maintaining a migration system. If you want to keep old
+    history across a schema change, back up tracking.db yourself first.
+    """
+    _reset_db_if_schema_drifted()
     from app import models_db  # noqa: F401  (ensure models are registered)
     Base.metadata.create_all(bind=engine)
 
 
-def _migrate_if_needed():
-    """
-    SQLAlchemy's create_all() only creates missing TABLES -- it never alters
-    an existing table's columns. If you're upgrading from an older version of
-    this app (before the `role` column, or before these monitoring-diagnostic
-    columns existed), the old tracking.db would crash every query instead of
-    just working. Since this is a SQLite prototype without a real migration
-    tool (Alembic), the safe fallback is: detect the old schema, move it
-    aside, and let a fresh one get created. This means old trade history
-    isn't silently lost -- it's renamed, not deleted. The canary column
-    checked here is always the newest one added, so any older schema
-    (missing `role`, or missing the diagnostics columns, or both) is caught.
-    """
+def _reset_db_if_schema_drifted():
     if not DATABASE_URL.startswith("sqlite"):
         return  # Postgres deployments should manage schema changes via a real migration tool
     db_path = DATABASE_URL.replace("sqlite:///", "")
@@ -56,12 +55,7 @@ def _migrate_if_needed():
     except sqlite3.OperationalError:
         cols = []
     conn.close()
-    if cols and "monitor_tick_count" not in cols:
-        import time
-        backup_path = f"{db_path}.pre-diagnostics-migration-{int(time.time())}.bak"
-        os.rename(db_path, backup_path)
-        print(  # noqa: T201 -- deliberately visible at startup, not just logged
-            f"[tracking DB] Old schema detected (missing monitoring-diagnostics columns added during the "
-            f"trigger-execution RCA fix). Moved it to {backup_path} and starting a fresh database. "
-            f"Your old trade history is preserved in that backup file but won't appear in the app anymore."
-        )
+    # Canary column is always the newest one added -- if it's missing, the schema is stale.
+    if cols and "unique_candles_checked" not in cols:
+        os.remove(db_path)
+        print(f"[tracking DB] Schema drift detected -- reset {db_path} to a fresh database (old history not preserved, by design).")  # noqa: T201

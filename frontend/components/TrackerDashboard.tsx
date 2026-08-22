@@ -231,9 +231,15 @@ function RecommendationCard({ rec, title, subtitle, accent }: { rec: Recommendat
         <details className="text-xs text-ink-faint">
           <summary className="cursor-pointer hover:text-ink-muted select-none">Monitoring diagnostics — was this actually being watched?</summary>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-2">
-            <StatTile label="Times checked today" value={`${rec.diagnostics.monitor_tick_count}`} />
+            <StatTile label="Times checked" value={`${rec.diagnostics.monitor_tick_count}`} sub="raw polls, including repeats" />
+            <StatTile label="Unique candles seen" value={`${rec.diagnostics.unique_candles_checked}`} sub="distinct 15-min candles evaluated" />
             <StatTile label="Last checked" value={rec.diagnostics.last_price_checked_at ? new Date(rec.diagnostics.last_price_checked_at).toLocaleTimeString("en-IN") : "Not yet"} />
             <StatTile label="Best price seen" value={rec.diagnostics.mfe_index_level != null ? rec.diagnostics.mfe_index_level.toLocaleString("en-IN") : "—"} />
+            <StatTile
+              label="Decisive candle"
+              value={rec.diagnostics.last_completed_candle_close != null ? rec.diagnostics.last_completed_candle_close.toLocaleString("en-IN") : "—"}
+              sub={rec.diagnostics.last_completed_candle_timestamp ? new Date(rec.diagnostics.last_completed_candle_timestamp).toLocaleTimeString("en-IN") : undefined}
+            />
           </div>
           {rec.diagnostics.monitor_tick_count === 0 && rec.status === "PENDING" && (
             <p className="mt-2 text-gold/80">Not checked yet today — this updates automatically the next time this tab is open during market hours, or via the background scheduler if the server has been running continuously.</p>

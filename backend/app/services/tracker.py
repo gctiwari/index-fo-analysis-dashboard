@@ -114,9 +114,15 @@ def _store_recommendation(db: Session, index_key: str, trade_date, role: str, cm
     db.commit()
     db.refresh(rec)
 
-    # Immediate-entry ideas (Primary only, when confidence is high) are considered confirmed at generation time.
-    if rec.entry_type == "Immediate":
-        _execute(db, rec, entry_index_level=cmp, entry_premium=rec.premium_at_generation, entry_time=now_ist().replace(tzinfo=None))
+    # RCA fix: "Immediate" trades used to self-execute right here, synchronously, using the raw
+    # generation-time price with ZERO candle confirmation -- i.e. confidence alone was being
+    # treated as entry confirmation, which is a bug (see backend/README.md's "Immediate trade
+    # audit"). Immediate trades now go through the exact same completed-15m-candle-close check
+    # in monitor_tick() as Conditional trades. What makes them "Immediate" is preserved: their
+    # entry_trigger_index_level is set to the generation-time cmp (see trades.py), so they still
+    # confirm on the very next completed candle with no minimum distance requirement -- unlike
+    # Conditional trades, which require price to actually travel ~0.25x ATR first. The strategic
+    # distinction survives; the bypass of price confirmation does not.
 
     return rec
 
@@ -187,6 +193,15 @@ def _dte_remaining(expiry_str: str) -> int:
 
 
 def _execute(db: Session, rec: Recommendation, entry_index_level: float, entry_premium: float, entry_time: datetime):
+    """The ONLY place a Recommendation is allowed to become EXECUTED. Guarded at this lowest
+    level (not just by the caller's query filter) so that no future code path can accidentally
+    execute a row twice or execute one that's already EXECUTED/INVALIDATED/NOT_EXECUTED (Item 6)."""
+    if rec.status != "PENDING":
+        logger.warning("_execute called on a non-PENDING recommendation (id=%s, status=%s) -- ignored, this should never happen.", rec.id, rec.status)
+        return
+    if rec.paper_trade is not None:
+        logger.warning("_execute called on a recommendation that already has a paper trade (id=%s) -- ignored, refusing to create a duplicate.", rec.id)
+        return
     trade = PaperTrade(
         recommendation_id=rec.id,
         index_key=rec.index_key,
@@ -206,6 +221,11 @@ def _execute(db: Session, rec: Recommendation, entry_index_level: float, entry_p
 
 
 def _close(db: Session, trade: PaperTrade, exit_index_level: float, exit_premium: float, exit_time: datetime, outcome: str):
+    """The ONLY place a PaperTrade is allowed to become CLOSED. Same defense-in-depth guard as
+    _execute -- a CLOSED trade's exit must never be overwritten by a later, stale monitoring pass."""
+    if trade.status != "OPEN":
+        logger.warning("_close called on a non-OPEN paper trade (id=%s, status=%s) -- ignored, refusing to overwrite its exit.", trade.id, trade.status)
+        return
     trade.exit_index_level = exit_index_level
     trade.exit_premium = exit_premium
     trade.exit_time = exit_time
@@ -257,10 +277,27 @@ def monitor_tick(db: Session, index_key: str):
         .all()
     )
     for rec in pending:
+        # State-machine guard (Item 6), defense-in-depth on top of the query filter above: this
+        # loop must NEVER act on a row that isn't genuinely PENDING. The query filter already
+        # enforces this, but SQLAlchemy identity-maps objects within a session, so if this
+        # function is ever called twice against the same session before a commit lands, a stale
+        # in-memory reference could otherwise slip through. Once EXECUTED, INVALIDATED, or
+        # NOT_EXECUTED, a row must never transition again -- explicit and self-documenting here.
+        if rec.status != "PENDING":
+            continue
+
         rec.monitor_tick_count = (rec.monitor_tick_count or 0) + 1
         rec.last_price_checked = live_tick
         rec.last_price_checked_at = now
         rec.last_check_source = candle["source"]
+
+        # Item 5 diagnostics: track unique candles actually processed, distinct from raw tick
+        # count -- only increments when this is a genuinely different candle than last time.
+        candle_ts_naive = candle["candle_start"].replace(tzinfo=None) if candle.get("candle_start") is not None else None
+        if candle_ts_naive is not None and candle_ts_naive != rec.last_completed_candle_timestamp:
+            rec.unique_candles_checked = (rec.unique_candles_checked or 0) + 1
+        rec.last_completed_candle_timestamp = candle_ts_naive
+        rec.last_completed_candle_close = confirmed_price if candle["is_completed"] else rec.last_completed_candle_close
 
         # Track max favorable excursion toward the trigger, for diagnostics even when it never fires.
         if rec.option_type == "CALL":
@@ -314,6 +351,10 @@ def monitor_tick(db: Session, index_key: str):
         .all()
     )
     for trade in open_trades:
+        # Same state-machine guard as above, applied to the PaperTrade lifecycle: a CLOSED trade
+        # must never be re-closed or have its exit overwritten.
+        if trade.status != "OPEN":
+            continue
         rec = trade.recommendation
         dte = _dte_remaining(rec.expiry)
         premium = estimate_premium(live_tick, rec.strike, dte, rec.atr_pct_at_generation, rec.option_type)

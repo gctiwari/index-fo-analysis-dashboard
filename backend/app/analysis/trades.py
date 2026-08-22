@@ -31,6 +31,15 @@ def _next_weekly_expiry(today: date | None = None) -> date:
 
 
 def estimate_premium(spot: float, strike: float, days_to_expiry: int, atr_pct: float, option_type: str) -> float:
+    # Defensive floor, not something reachable with real index data: Black-Scholes' d1 needs
+    # log(spot/strike), which is undefined for a non-positive spot or strike. With real NIFTY/
+    # BANKNIFTY/SENSEX data this can't happen (ATR is a small fraction of a percent of the
+    # index level, never large enough to drive a target level to zero or below) -- this guard
+    # exists purely so a genuinely pathological input degrades to a floor value instead of an
+    # unhandled crash, e.g. if this function is ever reused for a very differently-scaled
+    # instrument in the future.
+    if spot <= 0 or strike <= 0:
+        return 0.5
     t = max(days_to_expiry, 1) / 365
     sigma = max(atr_pct / 100 * math.sqrt(252), 0.08)  # annualize daily ATR% as a vol proxy, floor at 8%
     d1 = (math.log(spot / strike) + (RISK_FREE_RATE + 0.5 * sigma ** 2) * t) / (sigma * math.sqrt(t))
@@ -92,7 +101,12 @@ def generate_trade_idea(index_key: str, cmp: float, confluence: dict, ind: dict,
     trigger = (
         f"Enter on a 15-min close beyond {entry_trigger_index_level:.0f}" if option_type == "CALL" and entry_type == "Conditional"
         else f"Enter on a 15-min close below {entry_trigger_index_level:.0f}" if entry_type == "Conditional"
-        else "Current price action already confirms the setup; enter at CMP."
+        else (
+            f"High-confidence setup ({confidence:.0f}%) -- enter on the very next completed 15-min candle that "
+            f"closes {'at or above' if option_type == 'CALL' else 'at or below'} {entry_trigger_index_level:.0f} "
+            f"(no need to wait for price to travel further first, unlike a Conditional trade -- but this still "
+            f"requires an actual completed-candle confirmation, not just the confidence score)."
+        )
     )
 
     reasoning = (

@@ -29,9 +29,12 @@ export interface LiveStatus {
 
 export interface RecommendationDiagnostics {
   monitor_tick_count: number;
+  unique_candles_checked: number;
   last_price_checked: number | null;
   last_price_checked_at: string | null;
   last_check_source: string | null;
+  last_completed_candle_timestamp: string | null;
+  last_completed_candle_close: number | null;
   mfe_index_level: number | null;
   trigger_reached_at: string | null;
 }

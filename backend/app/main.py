@@ -5,7 +5,7 @@ import os
 from app.api.routes import router
 from app.api.tracking_routes import router as tracking_router
 from app.db import init_db
-from app.scheduler import start_scheduler
+from app.scheduler import start_scheduler, stop_scheduler
 from app.json_safety import SafeJSONResponse
 
 app = FastAPI(
@@ -38,6 +38,14 @@ app.include_router(tracking_router, prefix="/api")
 def _on_startup():
     init_db()
     start_scheduler()
+
+
+@app.on_event("shutdown")
+def _on_shutdown():
+    # Item 4 of the follow-up audit: verify scheduler shutdown behavior. Without this, the
+    # APScheduler background thread has no clean stop signal on app shutdown (uvicorn --reload
+    # in particular can otherwise accumulate orphaned scheduler instances across reloads).
+    stop_scheduler()
 
 
 @app.get("/")

@@ -69,8 +69,17 @@ class Recommendation(Base):
     last_check_source = Column(String, nullable=True)  # e.g. "completed_15m_close", "live_tick_fallback"
     mfe_index_level = Column(Float, nullable=True)  # most favorable price seen so far while PENDING
     trigger_reached_at = Column(DateTime, nullable=True)
-    monitor_tick_count = Column(Integer, default=0)  # how many times this row was actually checked -- a low
-    # count relative to how long it's been PENDING is itself direct evidence of a coverage gap.
+    monitor_tick_count = Column(Integer, default=0)  # how many times monitor_tick() ran against this row --
+    # NOT the same as unique candles processed (see below): the same completed candle can legitimately be
+    # observed on several consecutive ticks before the next one closes. A low count relative to how long
+    # this has been PENDING is itself direct evidence of a coverage gap.
+    unique_candles_checked = Column(Integer, default=0)  # count of DISTINCT completed-candle timestamps this
+    # row has actually been evaluated against -- increments only when the candle timestamp changes from the
+    # previous check. This answers "how many real market candles has this decision actually seen" as opposed
+    # to "how many times did the process happen to poll" (monitor_tick_count).
+    last_completed_candle_timestamp = Column(DateTime, nullable=True)  # start time (IST) of the completed
+    # 15-min candle actually used for the most recent entry decision -- answers "which candle, exactly".
+    last_completed_candle_close = Column(Float, nullable=True)  # that candle's close price.
 
     paper_trade = relationship("PaperTrade", back_populates="recommendation", uselist=False)
 

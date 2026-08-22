@@ -1,145 +1,90 @@
 """
-Step 13's exact 5 scenarios, run against the real monitor_tick() function.
+The 6 required entry-confirmation scenarios, run against the real
+monitor_tick() function with an isolated in-memory DB per test.
 """
-import sys, numpy as np, pandas as pd
-from datetime import datetime, timedelta
-import pytz
-sys.path.insert(0, ".")
-IST = pytz.timezone("Asia/Kolkata")
+import app.services.tracker as tracker
+from tests.conftest import make_recommendation
 
-# ---- Set up a minimal daily df so generate_daily_recommendations can build indicators/levels ----
-def make_daily_df(n=300, base=100.0, seed=1):
-    np.random.seed(seed)
-    dates = pd.date_range("2024-01-01", periods=n, freq="B")
-    ret = np.random.normal(0.0002, 0.004, n)
-    close = base * np.exp(np.cumsum(ret))
-    high = close * 1.003
-    low = close * 0.997
-    open_ = close
-    vol = np.zeros(n)
-    df = pd.DataFrame({"open": open_, "high": high, "low": low, "close": close, "volume": vol}, index=dates)
-    df.index.name = "datetime"
-    return df
 
-import app.data.fetcher as fetcher
-import app.services.tracker as trkmod
-from app.db import Base, engine, SessionLocal
-from app.models_db import Recommendation, PaperTrade
+def test_scenario1_trigger_never_reached_becomes_not_executed(db_session, mock_completed_candle):
+    rec = make_recommendation(db_session, option_type="CALL", entry_trigger_index_level=105.0, stop_index_level=95.0)
+    mock_completed_candle(close=103.0, is_completed=True)  # never reaches 105
 
-Base.metadata.drop_all(bind=engine)
-Base.metadata.create_all(bind=engine)
+    tracker.monitor_tick(db_session, "NIFTY")
+    db_session.refresh(rec)
+    assert rec.status == "PENDING"  # not yet end of day
 
-def reset_db():
-    Base.metadata.drop_all(bind=engine)
-    Base.metadata.create_all(bind=engine)
+    tracker.finalize_day(db_session, "NIFTY")
+    db_session.refresh(rec)
+    assert rec.status == "NOT_EXECUTED"
+    assert "not reached" in rec.not_executed_reason.lower()
 
-def make_rec(db, option_type, trigger, stop, cmp=100.0):
-    from app.services.market_hours import today_ist
-    rec = Recommendation(
-        index_key="NIFTY", trade_date=today_ist(), role="PRIMARY", status="PENDING",
-        direction="Bullish" if option_type == "CALL" else "Bearish", option_type=option_type,
-        strike=round(trigger), expiry=(today_ist() + timedelta(days=7)).isoformat(), lot_size=75,
-        cmp_at_generation=cmp, premium_at_generation=50.0, entry_type="Conditional",
-        entry_trigger_desc=f"Enter on a 15-min close beyond {trigger}", entry_trigger_index_level=trigger,
-        target_index_1=trigger + 10, target_index_2=trigger + 20, target_index_3=trigger + 30,
-        stop_index_level=stop, target_premium_1=60.0, target_premium_2=70.0, target_premium_3=80.0,
-        stop_premium=30.0, atr_pct_at_generation=1.0, confidence_score=65.0, reasoning="test",
+
+def test_scenario2_intrabar_touch_without_15m_close_stays_pending(db_session, mock_completed_candle):
+    rec = make_recommendation(db_session, option_type="CALL", entry_trigger_index_level=105.0, stop_index_level=95.0)
+    # Completed candle closed at 104 (below trigger) -- even if intrabar price poked above 105,
+    # the CLOSE is what matters, and it didn't confirm.
+    mock_completed_candle(close=104.0, is_completed=True)
+
+    tracker.monitor_tick(db_session, "NIFTY")
+    db_session.refresh(rec)
+
+    assert rec.status == "PENDING"
+    assert rec.paper_trade is None
+
+
+def test_scenario3_valid_call_confirmation_executes(db_session, mock_completed_candle):
+    rec = make_recommendation(db_session, option_type="CALL", entry_trigger_index_level=105.0, stop_index_level=95.0)
+    mock_completed_candle(close=106.0, is_completed=True)
+
+    tracker.monitor_tick(db_session, "NIFTY")
+    db_session.refresh(rec)
+
+    assert rec.status == "EXECUTED"
+    assert rec.paper_trade is not None
+    assert rec.paper_trade.status == "OPEN"
+
+
+def test_scenario4_valid_put_confirmation_executes(db_session, mock_completed_candle):
+    rec = make_recommendation(
+        db_session, option_type="PUT", direction="Bearish",
+        entry_trigger_index_level=95.0, stop_index_level=105.0,
+        entry_trigger_desc="Enter on a 15-min close below 95",
     )
-    db.add(rec); db.commit(); db.refresh(rec)
-    return rec
+    mock_completed_candle(close=94.0, is_completed=True)
 
-def fifteen_min_df(closes):
-    now = datetime.now(IST)
-    n = len(closes)
-    # Make the LAST candle fully elapsed (started 20 min ago) so it's always treated as completed in these tests.
-    starts = [now - timedelta(minutes=20) - timedelta(minutes=15*(n-1-i)) for i in range(n)]
-    idx = pd.DatetimeIndex(starts)
-    return pd.DataFrame({"open": closes, "high": [c+0.5 for c in closes], "low": [c-0.5 for c in closes],
-                          "close": closes, "volume": [0]*n}, index=idx)
+    tracker.monitor_tick(db_session, "NIFTY")
+    db_session.refresh(rec)
 
-# ============ Scenario 1: Trigger never reached ============
-reset_db()
-db = SessionLocal()
-rec = make_rec(db, "CALL", trigger=105, stop=95, cmp=100)
-fetcher.get_last_completed_candle = lambda idx, tf="15m": {"close": 103.0, "candle_start": None, "is_completed": True, "source": "completed_15m_close"}
-fetcher.get_last_price = lambda idx: 103.0
-trkmod.get_last_completed_candle = fetcher.get_last_completed_candle
-trkmod.get_last_price = fetcher.get_last_price
-trkmod.monitor_tick(db, "NIFTY")
-db.refresh(rec)
-assert rec.status == "PENDING", f"Scenario 1 FAILED: expected still PENDING (not yet EOD), got {rec.status}"
-trkmod.finalize_day(db, "NIFTY")
-db.refresh(rec)
-assert rec.status == "NOT_EXECUTED", f"Scenario 1 FAILED: expected NOT_EXECUTED after finalize, got {rec.status}"
-print("Scenario 1 (trigger never reached) PASSED -> NOT_EXECUTED")
-db.close()
+    assert rec.status == "EXECUTED"
+    assert rec.paper_trade is not None
 
-# ============ Scenario 2: Trigger reached intrabar but 15m CLOSE condition not met ============
-reset_db()
-db = SessionLocal()
-rec = make_rec(db, "CALL", trigger=105, stop=95, cmp=100)
-# Completed candle CLOSED at 104 (below trigger), even though intrabar high might have poked above 105.
-fetcher.get_last_completed_candle = lambda idx, tf="15m": {"close": 104.0, "candle_start": None, "is_completed": True, "source": "completed_15m_close"}
-fetcher.get_last_price = lambda idx: 104.0
-trkmod.get_last_completed_candle = fetcher.get_last_completed_candle
-trkmod.get_last_price = fetcher.get_last_price
-trkmod.monitor_tick(db, "NIFTY")
-db.refresh(rec)
-assert rec.status == "PENDING", f"Scenario 2 FAILED: expected PENDING (close didn't confirm), got {rec.status}"
-print("Scenario 2 (trigger touched intrabar, 15m close doesn't confirm) PASSED -> still PENDING, not executed")
-db.close()
 
-# ============ Scenario 3: Valid confirmation (CALL) ============
-reset_db()
-db = SessionLocal()
-rec = make_rec(db, "CALL", trigger=105, stop=95, cmp=100)
-fetcher.get_last_completed_candle = lambda idx, tf="15m": {"close": 106.0, "candle_start": None, "is_completed": True, "source": "completed_15m_close"}
-fetcher.get_last_price = lambda idx: 106.0
-trkmod.get_last_completed_candle = fetcher.get_last_completed_candle
-trkmod.get_last_price = fetcher.get_last_price
-trkmod.monitor_tick(db, "NIFTY")
-db.refresh(rec)
-assert rec.status == "EXECUTED", f"Scenario 3 FAILED: expected EXECUTED, got {rec.status}"
-print("Scenario 3 (valid 15m close confirmation, CALL) PASSED -> EXECUTED")
-db.close()
+def test_scenario5_setup_invalidated_before_entry(db_session, mock_completed_candle):
+    rec = make_recommendation(db_session, option_type="CALL", entry_trigger_index_level=105.0, stop_index_level=95.0)
+    # Price closes at 94 -- THROUGH the stop (95) -- before ever reaching the trigger (105).
+    mock_completed_candle(close=94.0, is_completed=True)
 
-# ============ Scenario 4: PUT confirmation ============
-reset_db()
-db = SessionLocal()
-rec = make_rec(db, "PUT", trigger=95, stop=105, cmp=100)
-fetcher.get_last_completed_candle = lambda idx, tf="15m": {"close": 94.0, "candle_start": None, "is_completed": True, "source": "completed_15m_close"}
-fetcher.get_last_price = lambda idx: 94.0
-trkmod.get_last_completed_candle = fetcher.get_last_completed_candle
-trkmod.get_last_price = fetcher.get_last_price
-trkmod.monitor_tick(db, "NIFTY")
-db.refresh(rec)
-assert rec.status == "EXECUTED", f"Scenario 4 FAILED: expected EXECUTED, got {rec.status}"
-print("Scenario 4 (PUT confirmation) PASSED -> EXECUTED")
-db.close()
+    tracker.monitor_tick(db_session, "NIFTY")
+    db_session.refresh(rec)
 
-# ============ Scenario 5: Trigger reached only AFTER setup invalidation ============
-reset_db()
-db = SessionLocal()
-rec = make_rec(db, "CALL", trigger=105, stop=95, cmp=100)
-# First tick: price closes at 94, THROUGH the stop (95) -- setup invalidated before ever triggering.
-fetcher.get_last_completed_candle = lambda idx, tf="15m": {"close": 94.0, "candle_start": None, "is_completed": True, "source": "completed_15m_close"}
-fetcher.get_last_price = lambda idx: 94.0
-trkmod.get_last_completed_candle = fetcher.get_last_completed_candle
-trkmod.get_last_price = fetcher.get_last_price
-trkmod.monitor_tick(db, "NIFTY")
-db.refresh(rec)
-assert rec.status == "INVALIDATED", f"Scenario 5 step A FAILED: expected INVALIDATED, got {rec.status}"
-print("Scenario 5a (price breaks stop before ever triggering) PASSED -> INVALIDATED,", rec.invalidated_reason[:80])
+    assert rec.status == "INVALIDATED"
+    assert rec.invalidated_reason is not None
+    assert rec.paper_trade is None
 
-# Second tick: price now closes above the ORIGINAL trigger (105) -- should NOT flip back to EXECUTED.
-fetcher.get_last_completed_candle = lambda idx, tf="15m": {"close": 110.0, "candle_start": None, "is_completed": True, "source": "completed_15m_close"}
-fetcher.get_last_price = lambda idx: 110.0
-trkmod.get_last_completed_candle = fetcher.get_last_completed_candle
-trkmod.get_last_price = fetcher.get_last_price
-trkmod.monitor_tick(db, "NIFTY")
-db.refresh(rec)
-assert rec.status == "INVALIDATED", f"Scenario 5 step B FAILED: expected to STAY INVALIDATED (not late-execute), got {rec.status}"
-print("Scenario 5b (later crossing the old trigger does NOT late-execute) PASSED -> still INVALIDATED, not EXECUTED")
-db.close()
 
-print("\n\nALL 5 STEP-13 SCENARIOS PASSED")
+def test_scenario6_invalidated_trade_does_not_later_execute(db_session, mock_completed_candle):
+    rec = make_recommendation(db_session, option_type="CALL", entry_trigger_index_level=105.0, stop_index_level=95.0)
+
+    mock_completed_candle(close=94.0, is_completed=True)  # invalidates it
+    tracker.monitor_tick(db_session, "NIFTY")
+    db_session.refresh(rec)
+    assert rec.status == "INVALIDATED"
+
+    # Price now closes above the ORIGINAL trigger -- must NOT flip back to EXECUTED.
+    mock_completed_candle(close=110.0, is_completed=True)
+    tracker.monitor_tick(db_session, "NIFTY")
+    db_session.refresh(rec)
+
+    assert rec.status == "INVALIDATED", "an invalidated setup must never later execute"
+    assert rec.paper_trade is None

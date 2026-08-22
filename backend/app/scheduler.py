@@ -54,6 +54,16 @@ def _finalize_all():
 
 
 def start_scheduler():
+    """
+    *** PRIMARY monitoring mechanism *** -- see the architecture note in
+    tracking_routes.py for the full picture. This runs on a background
+    thread inside the same process as the FastAPI app. It keeps monitoring
+    on its own schedule for as long as the backend process is alive,
+    completely independent of whether any browser tab is open or any
+    frontend request is ever made. The opportunistic monitor triggered by
+    GET /today is a secondary safety net on top of this, not a replacement
+    for it.
+    """
     global _scheduler
     if _scheduler is not None:
         return _scheduler
@@ -68,3 +78,21 @@ def start_scheduler():
     _scheduler = sched
     logger.info("Scheduler started (generate 09:16, monitor every 3 min, finalize 15:32 IST, Mon-Fri)")
     return sched
+
+
+def stop_scheduler():
+    """Cleanly stops the background scheduler thread on app shutdown. Without this, the
+    scheduler has no explicit stop signal -- harmless on a normal single process exit (the
+    background thread dies with the process), but uvicorn --reload can otherwise accumulate
+    multiple overlapping scheduler instances across reloads, each independently polling and
+    firing the same jobs. wait=False so shutdown doesn't block waiting for an in-flight job."""
+    global _scheduler
+    if _scheduler is None:
+        return
+    try:
+        _scheduler.shutdown(wait=False)
+        logger.info("Scheduler stopped.")
+    except Exception:  # noqa: BLE001 -- shutdown should never raise and block app teardown
+        logger.exception("Error while stopping scheduler (non-fatal, continuing shutdown).")
+    finally:
+        _scheduler = None

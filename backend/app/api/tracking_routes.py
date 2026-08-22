@@ -15,20 +15,45 @@ from app.services.export import build_trade_log_dataframe, build_today_trades_da
 
 router = APIRouter()
 
-# RCA FIX (see backend/README.md "Audit: why trades weren't executing"): monitoring
-# previously only ran on the APScheduler's fixed 3-minute cron, which requires the
-# backend process to stay alive continuously and unattended. Opening/refreshing the
-# app did nothing to check triggers. This throttle lets /today ALSO run a monitoring
-# pass as a side effect during market hours -- so any real interaction with the app
-# checks live triggers, closing the coverage gap regardless of whether the dedicated
-# background scheduler process happened to be alive at that exact moment. Throttled
-# per-index to a floor of ~20s between opportunistic ticks so several browser tabs or
-# rapid refreshes don't hammer the upstream data source beyond what's useful.
+# ============================================================================
+# MONITORING ARCHITECTURE (Item 3 of the follow-up audit -- make this explicit)
+#
+#                        Backend process
+#                              |
+#                   APScheduler (scheduler.py)
+#                         *** PRIMARY ***
+#                              |
+#                       monitor_tick() every 3 min, 09:15-15:30 IST
+#                       Runs on a background thread inside the same
+#                       process. Keeps running as long as the backend
+#                       process is alive -- independent of whether any
+#                       browser tab is open, any frontend request is
+#                       made, or any user is looking at the dashboard.
+#                       This is the mechanism that must be running for
+#                       monitoring to happen at all.
+#
+#   Frontend GET /today (below)
+#         |
+#   _maybe_opportunistic_monitor()
+#         |
+#      *** SECONDARY SAFETY NET, NOT A REPLACEMENT ***
+#      Exists only to cover the specific real-world case where the
+#      backend process itself is started/stopped manually rather than
+#      kept running 24/7 (see backend/README.md's trigger-execution
+#      RCA). It does NOT make the scheduler unnecessary: with the
+#      backend running continuously, monitoring already happens via
+#      the scheduler with the browser fully closed. This is throttled
+#      to a ~20s floor per index specifically so it stays a light,
+#      occasional supplement rather than becoming a second monitoring
+#      loop competing with the scheduler.
+# ============================================================================
 _last_opportunistic_tick: dict[str, float] = {}
 _OPPORTUNISTIC_COOLDOWN_SECONDS = 20
 
 
 def _maybe_opportunistic_monitor(db: Session, index_key: str):
+    """SECONDARY safety net only -- see the architecture note above. The scheduler
+    in scheduler.py is what actually keeps the system monitoring continuously."""
     if not is_market_open():
         return
     import time as _time
@@ -41,6 +66,7 @@ def _maybe_opportunistic_monitor(db: Session, index_key: str):
         tracker.monitor_tick(db, index_key)
     except Exception:  # noqa: BLE001 -- never let an opportunistic check break the read endpoint
         pass
+
 
 
 def _require_active(index_key: str):
@@ -86,9 +112,12 @@ def _rec_to_dict(rec: Recommendation) -> dict:
         # Monitoring diagnostics -- directly answers "was this actually being watched, and how closely"
         "diagnostics": {
             "monitor_tick_count": rec.monitor_tick_count or 0,
+            "unique_candles_checked": rec.unique_candles_checked or 0,
             "last_price_checked": rec.last_price_checked,
             "last_price_checked_at": rec.last_price_checked_at.isoformat() if rec.last_price_checked_at else None,
             "last_check_source": rec.last_check_source,
+            "last_completed_candle_timestamp": rec.last_completed_candle_timestamp.isoformat() if rec.last_completed_candle_timestamp else None,
+            "last_completed_candle_close": rec.last_completed_candle_close,
             "mfe_index_level": rec.mfe_index_level,
             "trigger_reached_at": rec.trigger_reached_at.isoformat() if rec.trigger_reached_at else None,
         },

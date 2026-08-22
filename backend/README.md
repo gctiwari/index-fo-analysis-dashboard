@@ -143,9 +143,9 @@ Open-position stop-loss/target management deliberately still uses the live tick,
 Run them with:
 ```bash
 cd backend
-python3 tests/test_candle_completeness.py
-python3 tests/test_entry_confirmation_scenarios.py
-python3 tests/test_today_export_and_yesterday.py
+pip install -r requirements-dev.txt
+python -m pytest --collect-only -q   # confirms tests are actually discovered (currently 24)
+python -m pytest -v                   # runs them
 ```
 
 **On before/after execution-rate numbers:** no historical `tracking.db` or trade logs were available to analyze real generated trades — only the code itself. I'm not fabricating plausible-looking percentages. If you export your `tracking.db`, the `/api/performance/{index}` endpoint (and `compute_performance()` in `tracker.py`) can compute real before/after execution rates directly from it.
@@ -166,6 +166,98 @@ app/
     trades.py            rule-based trade-idea generator (Primary + 2 breakout legs) + Black-Scholes premium estimate
   api/routes.py       orchestrates the above into the dashboard payloads
 ```
+
+## Audit #3: follow-up hardening pass (pytest, Immediate-entry, state guards, scheduler docs)
+
+A third pass, triggered by a code review before pushing to GitHub, covering: proper pytest
+discoverability, an audit of the `Immediate` entry pathway, explicit state-transition guards,
+richer candle-level diagnostics, and confirmation that the scheduler remains the primary
+monitor. Database history was NOT preserved across this pass (explicitly out of scope by
+request) -- schema drift now just resets `tracking.db` to a fresh, empty database on startup.
+
+**1. Tests are now real pytest, not scripts.** The previous test files ran fine as
+`python tests/test_x.py` but were plain scripts with zero functions named `test_*`, so
+`pytest` collected 0 items -- pytest specifically looks for `test_*` functions/`Test*`
+classes, not top-level script code that happens to run assertions at import time. All test
+logic was converted into genuine `def test_...():` functions across 6 files, with a shared
+`conftest.py` providing:
+- `db_session` -- a fresh, isolated **in-memory** SQLite database per test (using
+  `poolclass=StaticPool`, which is required for in-memory SQLite under multiple connections --
+  without it, each connection gets its own separate empty database, which caused real
+  `no such table` failures during this work until fixed).
+- `client` -- a FastAPI TestClient wired to that same isolated DB via dependency override.
+- `mock_completed_candle` / `mock_daily_data` -- deterministic market-data mocking.
+- `make_recommendation()` -- a factory that derives premium/target/stop values from the
+  REAL `estimate_premium()` (Black-Scholes) function rather than arbitrary round numbers --
+  an earlier draft of this fixture used made-up premiums that didn't match what the app's
+  own pricing model computes for the same strike/spot, which caused a trade to spuriously
+  "stop out" on the same tick it executed purely because the fixture's numbers were internally
+  inconsistent with the pricing model, not because of any app bug.
+
+  Run with `cd backend && python -m pytest --collect-only -q` (reports 24 tests) and
+  `python -m pytest -v` (24 passed). Verified order-independence by running the full suite
+  twice consecutively and once with files in reverse order -- 24/24 every time.
+
+**2. Immediate-entry audit (full findings in the chat response, summarized here):** confirmed
+a real bug -- `entry_type = "Immediate" if confidence >= 75 else "Conditional"` was, until this
+pass, allowed to self-execute synchronously at generation time using the raw generation-time
+price, with zero candle confirmation. Confidence (a general multi-factor conviction score) was
+being treated as if it were a specific price-action confirmation, which it never checked. Fixed
+by removing the instant self-execution and routing Immediate trades through the exact same
+completed-15m-candle-close check as Conditional trades in `monitor_tick()`. The legitimate
+strategic distinction survives: Immediate trades still confirm fast (trigger = the generation-time
+cmp, no minimum distance), Conditional trades still require a real ~0.25x ATR move first -- what
+changed is that BOTH now require an actual completed candle to confirm, not just one of them.
+See `tests/test_immediate_entry_logic.py`.
+
+**3. Explicit state-transition guards (Item 6).** `_execute()` and `_close()` -- the only two
+functions allowed to move a Recommendation to EXECUTED or a PaperTrade to CLOSED -- now refuse
+and log a warning if called on a row that isn't genuinely PENDING/OPEN, as defense-in-depth on
+top of the query filters that already enforce this. `monitor_tick()`'s loops also skip any row
+that isn't PENDING/OPEN as an explicit, self-documenting guard. See `tests/test_state_transitions.py`
+for direct tests: an EXECUTED trade never re-executes across repeated ticks, a NOT_EXECUTED trade
+never executes even if price later crosses the old trigger, and a CLOSED paper trade's exit is
+never overwritten by a later monitoring pass.
+
+**4. Candle-level diagnostics (Item 5).** Added `unique_candles_checked`,
+`last_completed_candle_timestamp`, and `last_completed_candle_close` -- distinct from
+`monitor_tick_count` (raw poll count, which legitimately re-observes the same candle multiple
+times between candle closes). `unique_candles_checked` only increments when the candle
+timestamp actually changes, answering "how many real market candles has this decision seen"
+as opposed to "how many times did the process happen to poll." See `tests/test_candle_diagnostics.py`.
+
+**5. Scheduler confirmed as primary, opportunistic monitoring confirmed as secondary (Items
+3-4).** No behavior changed here -- the architecture was already correct (the APScheduler
+background thread runs independently of any HTTP request), but the code comments in
+`scheduler.py` and `tracking_routes.py` now say so explicitly, and `start_scheduler()`/the new
+`stop_scheduler()` are documented as the primary mechanism. Verified directly: started the real
+app (not mocked) and confirmed all 3 scheduler jobs (generate 09:16, monitor every 3 min,
+finalize 15:32, all Mon-Fri IST) register and the scheduler's `.running` is `True` independent
+of any request being made.
+
+**6. Scheduler shutdown gap found and fixed.** There was no `@app.on_event("shutdown")` handler
+at all -- the scheduler had no clean stop signal. Harmless on a normal process exit, but
+`uvicorn --reload` can accumulate orphaned scheduler instances across reloads without one. Added
+`stop_scheduler()` and wired it to a new shutdown handler in `main.py`.
+
+**7. A genuine Black-Scholes edge case found via testing, not present in real usage.**
+Broader test coverage surfaced a `math domain error` crash in `estimate_premium()` when handed
+a spot price mismatched in scale from a realistically-computed ATR (root cause: a test fixture
+bug, not reachable with real NIFTY/BANKNIFTY/SENSEX data -- ATR is never within two orders of
+magnitude of a real index level). Fixed the test fixture, and separately added a defensive floor
+in `estimate_premium()` itself so a non-positive spot/strike degrades to a floor value instead
+of crashing, as general robustness hygiene.
+
+**9-10. S/R and breakout logic re-audited once more, not re-assumed** -- searched every
+`levels["support"]`/`resistance[0]`/etc. usage across `levels.py`, `confluence.py`, `routes.py`,
+`trades.py`, and `tracker.py` again. Nearest-first ordering and the ATR-band validity gate
+(0.35x-3.0x ATR, technical candidates only, `None` when nothing qualifies) are unchanged and
+still correct. No changes made here.
+
+**Database history:** explicitly not preserved across this pass, per instruction. `app/db.py`'s
+schema-drift check now simply deletes and recreates `tracking.db` on drift (canary column:
+`unique_candles_checked`) instead of the previous backup-and-rename approach -- simpler, and
+losing old paper-trade history was explicitly declared acceptable.
 
 ## Known limitations / extension points (be aware before trusting this for real trading prep)
 
